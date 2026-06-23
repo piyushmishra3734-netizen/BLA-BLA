@@ -1,0 +1,101 @@
+rules_version = '2';
+
+/* ============================================================
+   FIRESTORE SECURITY RULES — Express Goods Carrier
+   Phase 2 (Auth/Profiles/Routes) + Phase 3 (Quotes/Orders)
+
+   HOW TO DEPLOY:
+   1. Firebase Console → Firestore Database → Rules tab
+   2. Paste this entire file, replacing what's there
+   3. Click "Publish"
+
+   OWNER ACCESS:
+   Owner is identified purely by email — piyushmishra3734@gmail.com.
+   Whoever signs in (Google or email/password) with that exact
+   email is treated as the owner everywhere in these rules AND
+   in the app's JS. No separate "role" field to manage or forget
+   to set — change the OWNER_EMAIL constant below (and the one
+   in dashboard.js / owner-dashboard.js) if this ever needs to
+   change.
+   ============================================================ */
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    /* ---------- helpers ---------- */
+    function isSignedIn() {
+      return request.auth != null;
+    }
+    function isOwner() {
+      return isSignedIn() &&
+        request.auth.token.email == "piyushmishra3734@gmail.com";
+    }
+    function isSelf(uid) {
+      return isSignedIn() && request.auth.uid == uid;
+    }
+
+    /* ---------- users/{uid} ----------
+       Phase 2: lightweight auth record, written on every login. */
+    match /users/{uid} {
+      allow read:  if isSelf(uid) || isOwner();
+      allow write: if isSelf(uid);
+    }
+
+    /* ---------- customerProfiles/{uid} ----------
+       Phase 2: onboarding + profile data, plus savedRoutes subcollection. */
+    match /customerProfiles/{uid} {
+      allow read:  if isSelf(uid) || isOwner();
+      allow write: if isSelf(uid);
+
+      match /savedRoutes/{routeId} {
+        allow read, write: if isSelf(uid);
+      }
+    }
+
+    /* ---------- counters/{name} ----------
+       Phase 3: sequential ID generator (Q-2026-0001, EGC-2026-0001).
+       Touched only inside a transaction from quote/order creation
+       logic (nextQuoteId / nextOrderId in phase3-core.js). The doc
+       may not exist yet on first use, and Firestore treats a
+       set({...}, {merge:true}) against a missing doc as a CREATE —
+       so both customers (creating quotes) and the owner (creating
+       orders) need create+update here. The actual access control
+       lives on the quotes/orders documents themselves, not on this
+       internal counter. */
+    match /counters/{name} {
+      allow read:   if isSignedIn();
+      allow create, update: if isSignedIn();
+      allow delete: if isOwner();
+    }
+
+    /* ---------- quotes/{quoteId} ----------
+       Module 1 & 2: customer creates, reads own; owner reads/updates all. */
+    match /quotes/{quoteId} {
+      allow create: if isSignedIn()
+                    && request.resource.data.customerUid == request.auth.uid
+                    && request.resource.data.status == "pending_review";
+
+      allow read:   if isSignedIn()
+                    && (resource.data.customerUid == request.auth.uid || isOwner());
+
+      /* Customers cannot edit or delete their own quote once submitted —
+         keeps the audit trail honest. Only the owner can change status,
+         add a note, or convert it into an order. */
+      allow update: if isOwner();
+      allow delete: if isOwner();
+    }
+
+    /* ---------- orders/{orderId} ----------
+       Module 5/7/8: created by owner-approval flow, read by customer
+       (their own) and owner (all). Status updates are owner-only. */
+    match /orders/{orderId} {
+      allow create: if isOwner();
+
+      allow read:   if isSignedIn()
+                    && (resource.data.customerUid == request.auth.uid || isOwner());
+
+      allow update: if isOwner();
+      allow delete: if isOwner();
+    }
+  }
+}
