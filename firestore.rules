@@ -1,0 +1,99 @@
+rules_version = '2';
+
+/* ============================================================
+   FIRESTORE SECURITY RULES — Express Goods Carrier
+   Phase 3 (Upgraded) — Full revised-quote workflow
+
+   New statuses introduced:
+     revised_by_owner  → owner sent a revised quote
+     customer_accepted → customer accepted the revision
+     customer_rejected → customer rejected the revision
+
+   Customers can now update their own quote document ONLY to
+   transition from 'revised_by_owner' → 'customer_accepted'
+   or 'customer_rejected'. No other customer updates allowed.
+   ============================================================ */
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    /* ---------- helpers ---------- */
+    function isSignedIn() {
+      return request.auth != null;
+    }
+    function isOwner() {
+      return isSignedIn() &&
+        request.auth.token.email == "piyushmishra3734@gmail.com";
+    }
+    function isSelf(uid) {
+      return isSignedIn() && request.auth.uid == uid;
+    }
+
+    /* ---------- users/{uid} ---------- */
+    match /users/{uid} {
+      allow read:  if isSelf(uid) || isOwner();
+      allow write: if isSelf(uid);
+    }
+
+    /* ---------- customerProfiles/{uid} ---------- */
+    match /customerProfiles/{uid} {
+      allow read:  if isSelf(uid) || isOwner();
+      allow write: if isSelf(uid);
+
+      match /savedRoutes/{routeId} {
+        allow read, write: if isSelf(uid);
+      }
+    }
+
+    /* ---------- counters/{name} ---------- */
+    match /counters/{name} {
+      allow read:          if isSignedIn();
+      allow create, update: if isSignedIn();
+      allow delete:        if isOwner();
+    }
+
+    /* ---------- quotes/{quoteId} ---------- */
+    match /quotes/{quoteId} {
+      /* Customers create quotes with status = pending_review */
+      allow create: if isSignedIn()
+                    && request.resource.data.customerUid == request.auth.uid
+                    && request.resource.data.status == "pending_review";
+
+      /* Customers read their own; owner reads all */
+      allow read:   if isSignedIn()
+                    && (resource.data.customerUid == request.auth.uid || isOwner());
+
+      /* Customers can ONLY update their own quote to accept or reject
+         a revision (revised_by_owner → customer_accepted / customer_rejected).
+         All other fields must remain unchanged — only status + updatedAt changes. */
+      allow update: if isOwner()
+                    || (
+                      isSignedIn()
+                      && resource.data.customerUid == request.auth.uid
+                      && resource.data.status == "revised_by_owner"
+                      && (
+                        request.resource.data.status == "customer_accepted" ||
+                        request.resource.data.status == "customer_rejected"
+                      )
+                      /* Prevent customers from changing other fields */
+                      && request.resource.data.customerUid == resource.data.customerUid
+                      && request.resource.data.pickup      == resource.data.pickup
+                      && request.resource.data.delivery    == resource.data.delivery
+                      && request.resource.data.weight      == resource.data.weight
+                    );
+
+      allow delete: if isOwner();
+    }
+
+    /* ---------- orders/{orderId} ---------- */
+    match /orders/{orderId} {
+      allow create: if isOwner();
+
+      allow read:   if isSignedIn()
+                    && (resource.data.customerUid == request.auth.uid || isOwner());
+
+      allow update: if isOwner();
+      allow delete: if isOwner();
+    }
+  }
+}
